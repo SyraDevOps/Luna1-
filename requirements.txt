@@ -1,19 +1,8 @@
-# --- Requirements for Quantum Chatbot API ---
-
-# Core deep learning framework, required by sentence-transformers
-torch
-
-# The main library for generating semantic sentence embeddings
-sentence-transformers
-
-# Used for efficient data loading and manipulation from CSV files
-pandas
-
-# High-performance web framework for building the API
+# requirements.txt
 fastapi
-
-# ASGI server to run the FastAPI application
 uvicorn[standard]
-
-# SQLite is part of the Python standard library, no installation needed.
-# numpy is installed as a dependency of torch and pandas.
+gunicorn
+torch
+sentence-transformers
+pydantic
+pysqlite3-binary  # Good practice for compatibility
