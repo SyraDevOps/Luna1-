@@ -1,8 +1,7 @@
-# requirements.txt
 fastapi
 uvicorn[standard]
 gunicorn
 torch
 sentence-transformers
 pydantic
-pysqlite3-binary  # Good practice for compatibility
+pysqlite3-binary
