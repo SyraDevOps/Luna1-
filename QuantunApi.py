@@ -1,4 +1,4 @@
-# --- START OF FILE ApiChat.py ---
+# --- START OF FILE QuantunApi.py ---
 
 import os
 import pickle
@@ -29,8 +29,21 @@ class HealthCheckResponse(BaseModel):
 class QuantumCerebro:
     def __init__(self, model_name: str, st_model: SentenceTransformer):
         self.model_name = model_name
-        self.db_path = f'Neuron_{self.model_name}.db'
-        self.embeddings_path = f'{self.model_name}_embeddings.pkl'
+        
+        # --- ALTERAÇÃO PARA RENDER ---
+        # Procura por uma variável de ambiente que define o caminho do disco persistente.
+        # Se não encontrar, usa o diretório atual ('.').
+        data_dir = os.getenv('RENDER_DISK_PATH', '.')
+        
+        # Garante que o diretório de dados exista antes de usá-lo.
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+            
+        # Constrói o caminho completo para os arquivos do banco de dados e embeddings.
+        self.db_path = os.path.join(data_dir, f'Neuron_{self.model_name}.db')
+        self.embeddings_path = os.path.join(data_dir, f'{self.model_name}_embeddings.pkl')
+        # --- FIM DA ALTERAÇÃO ---
+
         self.st_model = st_model
         self.known_answers = []
         self.known_embeddings = None
@@ -50,7 +63,15 @@ class QuantumCerebro:
         conexao.close()
 
     def carregar_base_conhecimento(self):
-        print(f"[{self.model_name}] Carregando base de conhecimento...")
+        print(f"[{self.model_name}] Carregando base de conhecimento de '{self.db_path}'...")
+        if not os.path.exists(self.db_path):
+             print(f"[{self.model_name}] Banco de dados não encontrado. Será criado um novo.")
+             self.known_questions_raw = []
+             self.known_questions_context = []
+             self.known_answers = []
+             self.known_embeddings = None
+             return
+             
         conexao = sqlite3.connect(self.db_path)
         cursor = conexao.cursor()
         cursor.execute("SELECT pergunta, resposta, contexto FROM neuronios ORDER BY id ASC")
@@ -112,14 +133,12 @@ class QuantumCerebro:
         if cos_scores[best_match_idx] > SIMILARITY_THRESHOLD:
             return self.known_answers[best_match_idx]
         else:
-            # Retorna um código especial para indicar baixa confiança
             return "LOW_CONFIDENCE_RESPONSE"
 
 # --- Gerenciador Global e Ciclo de Vida da API ---
 
 chatbot_manager: Dict[str, QuantumCerebro] = {}
 global_context: str | None = None
-# MUDANÇA AQUI: Variáveis para gerenciar o estado do modo root
 is_root_mode_active: bool = False
 last_unanswered_question: Optional[str] = None
 
@@ -127,13 +146,18 @@ last_unanswered_question: Optional[str] = None
 async def lifespan(app: FastAPI):
     print("Iniciando a API do Chatbot Luna...")
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Utilizando dispositivo: {device}")
     st_model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
-    app.state.st_model = st_model # Disponibiliza para a app
+    app.state.st_model = st_model
     
-    model_names = {f.replace("_embeddings.pkl", "") for f in os.listdir('.') if f.endswith("_embeddings.pkl")}
-    for name in sorted(list(model_names)):
-        print(f"Encontrado e carregando modelo: {name}")
-        chatbot_manager[name] = QuantumCerebro(model_name=name, st_model=st_model)
+    # Carrega os modelos existentes do disco persistente, se houver
+    data_dir = os.getenv('RENDER_DISK_PATH', '.')
+    if os.path.exists(data_dir):
+        model_names = {f.replace("Neuron_", "").replace(".db", "") for f in os.listdir(data_dir) if f.startswith("Neuron_") and f.endswith(".db")}
+        for name in sorted(list(model_names)):
+            print(f"Encontrado e carregando modelo: {name}")
+            chatbot_manager[name] = QuantumCerebro(model_name=name, st_model=st_model)
+    
     yield
     print("Encerrando a API do Chatbot.")
     chatbot_manager.clear()
@@ -165,42 +189,26 @@ async def set_session_context(request: ContextRequest):
 
 @app.post("/chat", tags=["Chat"])
 async def chat_with_luna(request: ChatRequest):
-    """
-    Endpoint principal para conversação, agora com lógica de modo root integrada.
-    """
     global is_root_mode_active, last_unanswered_question
-
-    # --- Lógica do Modo Root ---
-    ROOT_PASSWORD = "TCPSMYA"
+    ROOT_PASSWORD = os.getenv("ROOT_PASSWORD", "TCPSMYA") # Use uma variável de ambiente para a senha
     
-    # Ativar/Desativar modo root
     if request.message.strip() == ROOT_PASSWORD:
         is_root_mode_active = not is_root_mode_active
-        last_unanswered_question = None # Limpa a pergunta pendente ao trocar de modo
-        status_message = "Modo Root ativado. Agora posso aprender novas respostas." if is_root_mode_active else "Modo Root desativado."
+        last_unanswered_question = None
+        status_message = "Modo Root ativado." if is_root_mode_active else "Modo Root desativado."
         return {"response": status_message}
 
-    # Se o modo root estiver ativo e houver uma pergunta pendente, esta mensagem é a resposta.
     if is_root_mode_active and last_unanswered_question:
         brain = chatbot_manager.get(request.model_name)
         if not brain:
              raise HTTPException(status_code=404, detail=f"Modelo '{request.model_name}' não encontrado.")
-
         new_answer = request.message
         question_to_learn = last_unanswered_question
-        
-        # Adiciona o novo neurônio
         brain.adicionar_neuronio(pergunta=question_to_learn, resposta=new_answer, contexto=global_context)
-        
-        # Limpa o estado
         last_unanswered_question = None
-        
-        return {"response": f"Entendido! Aprendi que para '{question_to_learn}', a resposta é '{new_answer}'. A base de dados foi atualizada."}
+        return {"response": f"Aprendido! Para '{question_to_learn}', a resposta é '{new_answer}'."}
 
-    # --- Lógica de Chat Normal ---
-    
     if request.model_name not in chatbot_manager:
-        # Se o modelo não existe e o modo root está ativo, podemos criá-lo
         if is_root_mode_active:
             print(f"Modo Root: Criando novo modelo em tempo de execução: {request.model_name}")
             chatbot_manager[request.model_name] = QuantumCerebro(model_name=request.model_name, st_model=app.state.st_model)
@@ -213,12 +221,11 @@ async def chat_with_luna(request: ChatRequest):
 
     if answer == "LOW_CONFIDENCE_RESPONSE":
         if is_root_mode_active:
-            last_unanswered_question = request.message # Armazena a pergunta
+            last_unanswered_question = request.message
             return {"response": "Não sei a resposta. Como eu deveria responder?"}
         else:
             return {"response": "Não tenho certeza de como responder a isso. Pode tentar reformular a pergunta?"}
     
-    # Resposta normal, limpa qualquer pergunta pendente
     last_unanswered_question = None
     return {"response": answer}
 
@@ -228,5 +235,4 @@ if __name__ == "__main__":
     import uvicorn
     print("\nServidor da API da Luna iniciado.")
     print("Para testar os endpoints, acesse: http://127.0.0.1:8000/docs")
-    print("Abra o arquivo index.html em seu navegador para usar a interface gráfica.")
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv('PORT', 8000)))
